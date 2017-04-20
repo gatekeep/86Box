@@ -95,6 +95,7 @@ int net_slirp_inited=0;
 int net_is_pcap=0;      //and pretend pcap is dead.
 int net_is_vpn = 0;
 int is_connected_vpn = 0;
+int sdl_inited = 0;
 int fizz=0;
 void slirp_tic();
 
@@ -2399,8 +2400,17 @@ void *ne2000_init()
 		ne2000->base_address = device_get_config_int("addr");
 	}
 
-    if (SDLNet_Init() == -1) {
-        ne2000_log("failed SDLNet_Init\n");
+    if (sdl_inited == FALSE)
+    {
+        if (SDLNet_Init() == -1)
+        {
+            ne2000_log("failed SDLNet_Init\n");
+            sdl_inited = FALSE;
+        }
+        else
+        {
+            sdl_inited = TRUE;
+        }
     }
 
 	disable_netbios = device_get_config_int("disable_netbios");
@@ -2650,10 +2660,13 @@ void ne2000_close(void *p)
 
 	if(!net_is_pcap)
 	{
-		QueueDestroy(slirpq);
-		slirp_exit(0);
-		net_slirp_inited=0;
-		ne2000_log("ne2000 exiting slirp\n");
+        if (!net_is_vpn)
+        {
+            QueueDestroy(slirpq);
+            slirp_exit(0);
+            net_slirp_inited = 0;
+            ne2000_log("ne2000 exiting slirp\n");
+        }
 	}
 	else if (net_is_pcap && (net_pcap != NULL))
 	{
@@ -2661,7 +2674,10 @@ void ne2000_close(void *p)
 		ne2000_log("ne2000 closing pcap\n");
 	}
 
-    SDLNet_Quit();
+    if (sdl_inited == TRUE)
+    {
+        SDLNet_Quit();
+    }
 
 	ne2000_log("ne2000 close\n");
 }
