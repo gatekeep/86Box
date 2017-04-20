@@ -148,22 +148,10 @@ namespace EightSixBoxVPN.Comm
             if (!client.Connected)
                 return;
 #if TRACE
-            Messages.Trace("dest [" + PhysicalAddress.ToString() + "] src [" + pdu.Header.MacAddr[0].ToString("X") +
-                    pdu.Header.MacAddr[1].ToString("X") +
-                    pdu.Header.MacAddr[2].ToString("X") +
-                    pdu.Header.MacAddr[3].ToString("X") +
-                    pdu.Header.MacAddr[4].ToString("X") +
-                    pdu.Header.MacAddr[5].ToString("X") + "]");
-#if DUMP_ALL
             if (pdu != null)
             {
                 Messages.Trace("[SNIP .. Packet Tx To " + PhysicalAddress.ToString() + "]");
                 Messages.TraceHex("hdr", pdu.HeaderData, pdu.HeaderData.Length);
-                if (pdu.ContentData != null)
-                {
-                    Messages.TraceHex("packet", pdu.ContentData, pdu.ContentData.Length);
-                    Messages.Trace("packet length " + pdu.ContentData.Length);
-                }
                 Messages.Trace("hdr->checksum = " + pdu.Header.CRC.ToString("X"));
                 Messages.Trace("hdr->length = " + pdu.Header.Length.ToString());
                 Messages.Trace("hdr->macAddr = " +
@@ -175,15 +163,33 @@ namespace EightSixBoxVPN.Comm
                     pdu.Header.MacAddr[5].ToString("X"));
                 Messages.Trace("hdr->dataLength = " + pdu.Header.DataLength);
                 Messages.Trace("hdr->compressLength = " + pdu.Header.CompressedLength);
+                Messages.Trace("hdr length " + pdu.Header.Length);
+                if (pdu.ContentData != null)
+                {
+                    Messages.TraceHex("frame", pdu.ContentData, pdu.ContentData.Length);
+                    Messages.Trace("frame length " + pdu.ContentData.Length);
+                    Messages.Trace("MAC Destination = " +
+                        pdu.ContentData[0].ToString("X") + ":" +
+                        pdu.ContentData[1].ToString("X") + ":" +
+                        pdu.ContentData[2].ToString("X") + ":" +
+                        pdu.ContentData[3].ToString("X") + ":" +
+                        pdu.ContentData[4].ToString("X") + ":" +
+                        pdu.ContentData[5].ToString("X"));
+                    Messages.Trace("MAC Source = " +
+                        pdu.ContentData[6].ToString("X") + ":" +
+                        pdu.ContentData[7].ToString("X") + ":" +
+                        pdu.ContentData[8].ToString("X") + ":" +
+                        pdu.ContentData[9].ToString("X") + ":" +
+                        pdu.ContentData[10].ToString("X") + ":" +
+                        pdu.ContentData[11].ToString("X"));
+                }
                 Messages.Trace("[SNIP .. Packet Tx To " + PhysicalAddress.ToString() + "]");
             }
-#endif
 #endif
             // repackage data
             HandshakeHeader header = new HandshakeHeader();
             header.CRC = PacketCRC(pdu.ContentData, pdu.ContentData.Length);
             header.DataLength = (ushort)pdu.ContentData.Length;
-            //header.MacAddr = this.macAddress;
             header.MacAddr = pdu.Header.MacAddr;
 
             // compress data
@@ -198,11 +204,14 @@ namespace EightSixBoxVPN.Comm
             Array.Copy(compressedData, 0, buffer, header.Size, compressedData.Length);
 
             // transmit
-            if (Stream.CanWrite)
+            if (client.Connected)
             {
-                Stream.Flush();
-                Stream.Write(buffer, 0, buffer.Length);
-                Stream.Flush();
+                if (Stream.CanWrite)
+                {
+                    Stream.Flush();
+                    Stream.Write(buffer, 0, buffer.Length);
+                    Stream.Flush();
+                }
             }
         }
 
@@ -218,16 +227,11 @@ namespace EightSixBoxVPN.Comm
             {
                 // read PDU data from stream
                 ProtocolDataUnit pdu = ProtocolDataUnit.ReadFrom(tempBuffer);
-#if TRACE && DUMP_ALL
+#if TRACE
                 if (pdu != null)
                 {
                     Messages.Trace("[SNIP .. Packet Rx from " + PhysicalAddress.ToString() + "]");
                     Messages.TraceHex("hdr", pdu.HeaderData, pdu.HeaderData.Length);
-                    if (pdu.ContentData != null)
-                    {
-                        Messages.TraceHex("packet", pdu.ContentData, pdu.ContentData.Length);
-                        Messages.Trace("packet length " + pdu.ContentData.Length);
-                    }
                     Messages.Trace("hdr->checksum = " + pdu.Header.CRC.ToString("X"));
                     Messages.Trace("hdr->length = " + pdu.Header.Length.ToString());
                     Messages.Trace("hdr->macAddr = " +
@@ -239,6 +243,26 @@ namespace EightSixBoxVPN.Comm
                         pdu.Header.MacAddr[5].ToString("X"));
                     Messages.Trace("hdr->dataLength = " + pdu.Header.DataLength);
                     Messages.Trace("hdr->compressLength = " + pdu.Header.CompressedLength);
+                    Messages.Trace("hdr length " + pdu.Header.Length);
+                    if (pdu.ContentData != null)
+                    {
+                        Messages.TraceHex("frame", pdu.ContentData, pdu.ContentData.Length);
+                        Messages.Trace("frame length " + pdu.ContentData.Length);
+                        Messages.Trace("MAC Destination = " +
+                            pdu.ContentData[0].ToString("X") + ":" +
+                            pdu.ContentData[1].ToString("X") + ":" +
+                            pdu.ContentData[2].ToString("X") + ":" +
+                            pdu.ContentData[3].ToString("X") + ":" +
+                            pdu.ContentData[4].ToString("X") + ":" +
+                            pdu.ContentData[5].ToString("X"));
+                        Messages.Trace("MAC Source = " +
+                            pdu.ContentData[6].ToString("X") + ":" +
+                            pdu.ContentData[7].ToString("X") + ":" +
+                            pdu.ContentData[8].ToString("X") + ":" +
+                            pdu.ContentData[9].ToString("X") + ":" +
+                            pdu.ContentData[10].ToString("X") + ":" +
+                            pdu.ContentData[11].ToString("X"));
+                    }
                     Messages.Trace("[SNIP .. Packet Rx from " + PhysicalAddress.ToString() + "]");
                 }
 #endif

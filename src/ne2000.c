@@ -75,7 +75,7 @@ IPaddress nicServConnIp;			// IPAddress for client connection to server
 TCPsocket nicClientSocket;
 
 SDLNet_SocketSet clientSocketSet;
-packetBuffer incomingPacket;
+packetBuffer incomingPkt;
 
 #define SOCKETTABLESIZE 16
 #define CONVIP(hostvar) hostvar & 0xff, (hostvar >> 8) & 0xff, (hostvar >> 16) & 0xff, (hostvar >> 24) & 0xff
@@ -311,7 +311,7 @@ void DisconnectFromServer(int unexpected)
 {
     if (unexpected)
         ne2000_log("ne2000: server disconnected unexpectedly\n");
-    if (incomingPacket.connected != FALSE)
+    if (incomingPkt.connected != FALSE)
     {
         handshake_hdr *regHeader = malloc(sizeof(handshake_hdr));
         regHeader->magic = PKT_MAGIC;
@@ -331,7 +331,7 @@ void DisconnectFromServer(int unexpected)
         // send shutdown string to server
         SDLNet_TCP_Send(nicClientSocket, regHeader, sizeof(handshake_hdr));
 
-        incomingPacket.connected = FALSE;
+        incomingPkt.connected = FALSE;
         SDLNet_TCP_Close(nicClientSocket);
         free(regHeader);
     }
@@ -392,7 +392,7 @@ int ConnectToServer(char const *strAddr, uint16_t tcpPort)
             numsent = SDLNet_TCP_Send(nicClientSocket, regHeader, sizeof(handshake_hdr));
             if (!numsent)
             {
-                incomingPacket.connected = FALSE;
+                incomingPkt.connected = FALSE;
                 ne2000_log("ne2000: unable to connect to server: %s\n", SDLNet_GetError());
                 SDLNet_TCP_Close(nicClientSocket);
                 return FALSE;
@@ -434,20 +434,20 @@ int ConnectToServer(char const *strAddr, uint16_t tcpPort)
                 ne2000_log("ne2000: connected to server.  MAC address is %x:%x:%x:%x:%x:%x\n", CONVMAC(maclocal));
 
                 free(regHeader);
-                incomingPacket.connected = TRUE;
+                incomingPkt.connected = TRUE;
                 return TRUE;
             }
         }
         else
         {
-            incomingPacket.connected = FALSE;
+            incomingPkt.connected = FALSE;
             ne2000_log("ne2000: unable to open socket, %s\n", SDLNet_GetError());
             WSAErrno = WSAGetLastError();
         }
     }
     else
     {
-        incomingPacket.connected = FALSE;
+        incomingPkt.connected = FALSE;
         ne2000_log("ne2000: Unable resolve connection to server %s\n", SDLNet_GetError());
     }
 
@@ -501,9 +501,9 @@ static void hexDump(char *desc, const void *addr, int len)
 }
 #endif
 
-static void sendPacket(uint8_t *packetData, uint16_t packetsize)
+static void sendFrame(uint8_t *outFrame, uint16_t frameLength)
 {
-    if (incomingPacket.connected == FALSE)
+    if (incomingPkt.connected == FALSE)
     {
         const char* serverAddr = config_get_string(NULL, "vpn_server", "nothing");
         int serverPort = config_get_int(NULL, "vpn_port", 0);
@@ -525,37 +525,37 @@ static void sendPacket(uint8_t *packetData, uint16_t packetsize)
     }
 
     handshake_hdr *hdr = malloc(sizeof(handshake_hdr));
-    unsigned long compressedSize = compressBound(packetsize);
+    unsigned long compressedSize = compressBound(frameLength);
     uint8_t *compressedPacket = (uint8_t *)malloc(compressedSize);
 
     /* compress packet */
     int zErr;
-    if ((zErr = compress(compressedPacket, &compressedSize, packetData, packetsize)) != Z_OK)
+    if ((zErr = compress(compressedPacket, &compressedSize, outFrame, frameLength)) != Z_OK)
         ne2000_log("ne2000: failed to compress outgoing packet\n");
 
     /* create packet header */
     hdr->magic = PKT_MAGIC;
-    hdr->checkSum = packetCRC(&packetData[0], packetsize);
-    hdr->dataLength = packetsize;
+    hdr->checkSum = packetCRC(&outFrame[0], frameLength);
+    hdr->dataLength = frameLength;
     hdr->compressLength = (uint16_t)compressedSize;
     memcpy(hdr->macAddr, maclocal, sizeof(maclocal));
     hdr->length = (uint16_t)compressedSize + sizeof(handshake_hdr);
 
-    uint8_t *outputData = (uint8_t *)malloc(hdr->length);
-    memset(outputData, 0, hdr->length);
+    uint8_t *buf = (uint8_t *)malloc(hdr->length);
+    memset(buf, 0, hdr->length);
 
     /* add packet header to output data */
-    memcpy(outputData, hdr, sizeof(handshake_hdr));
+    memcpy(buf, hdr, sizeof(handshake_hdr));
 
     /* copy actual packet data to output */
-    memcpy(outputData + sizeof(handshake_hdr), compressedPacket, compressedSize);
+    memcpy(buf + sizeof(handshake_hdr), compressedPacket, compressedSize);
 
     // Since we're using a channel, we won't send the IP address again
-    int len = SDLNet_TCP_Send(nicClientSocket, outputData, hdr->length);
+    int len = SDLNet_TCP_Send(nicClientSocket, buf, hdr->length);
     if (len == 0)
     {
-        ne2000_log("ne2000: could not send packet: %s\n", SDLNet_GetError());
-        free(outputData);
+        ne2000_log("ne2000: could not send packet\n");
+        free(buf);
         free(hdr);
         free(compressedPacket);
         DisconnectFromServer(TRUE);
@@ -564,10 +564,8 @@ static void sendPacket(uint8_t *packetData, uint16_t packetsize)
 
 #ifdef ENABLE_PACKET_TRACER
     pkttrc_log("[SNIP .. Packet Tx to Server]\n");
+    hexDump("buf (128)", buf, 128);
     hexDump("hdr", hdr, sizeof(handshake_hdr));
-    hexDump("outPacket", packetData, packetsize);
-    pkttrc_log("outPacket length %d\n", packetsize);
-    hexDump("outputData", outputData, hdr->length);
     pkttrc_log("hdr->magic = %x\n", hdr->magic);
     pkttrc_log("hdr->checksum = %x\n", hdr->checkSum);
     pkttrc_log("hdr->length = %d\n", hdr->length);
@@ -575,10 +573,12 @@ static void sendPacket(uint8_t *packetData, uint16_t packetsize)
     pkttrc_log("hdr->dataLength = %d\n", hdr->dataLength);
     pkttrc_log("hdr->compressLength = %d\n", hdr->compressLength);
     pkttrc_log("hdr length %d\n", sizeof(handshake_hdr));
-    pkttrc_log("bytes written %d\n", len);
+    hexDump("outFrame", outFrame, frameLength);
+    pkttrc_log("outFrame length %d\n", frameLength);
+    pkttrc_log("[bytes written %d]\n", len);
     pkttrc_log("[SNIP .. Packet Tx to Server]\n");
 #endif
-    free(outputData);
+    free(buf);
     free(hdr);
     free(compressedPacket);
 }
@@ -771,7 +771,7 @@ void ne2000_write_cr(ne2000_t *ne2000, uint32_t value)
 		{
             if (net_is_vpn)
             {
-                sendPacket(&ne2000->mem[ne2000->tx_page_start * 256 - BX_NE2K_MEMSTART], ne2000->tx_bytes);
+                sendFrame(&ne2000->mem[ne2000->tx_page_start * 256 - BX_NE2K_MEMSTART], ne2000->tx_bytes);
                 ne2000_log("ne2000 vpn sending packet\n");
             }
             else
@@ -1822,12 +1822,14 @@ void ne2000_rx_frame(void *p, const void *buf, int io_len)
 	uint8_t *pktbuf = (uint8_t *) buf;
 	uint8_t *startptr;
 	static uint8_t bcast_addr[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
-	uint32_t mac_cmp32[2];
-	uint16_t mac_cmp16[2];
 
 	if(io_len != 60)
 	{
-		ne2000_log("rx_frame with length %d\n", io_len);
+#ifdef ENABLE_PACKET_TRACER
+        pkttrc_log("rx_frame with length %d\n", io_len);
+#else
+        ne2000_log("rx_frame with length %d\n", io_len);
+#endif
 	}
 
 	if	((ne2000->CR.stop != 0) ||
@@ -1877,42 +1879,48 @@ void ne2000_rx_frame(void *p, const void *buf, int io_len)
 	// Do address filtering if not in promiscuous mode
 	if (! ne2000->RCR.promisc)
 	{
-		/* Received. */
-		mac_cmp32[0] = *(uint32_t *) (buf);
-		mac_cmp16[0] = *(uint16_t *) (buf+4);
-		/* Local. */
-		mac_cmp32[1] = *(uint32_t *) (bcast_addr);
-		mac_cmp16[1] = *(uint16_t *) (bcast_addr+4);
-		if ((mac_cmp32[0] == mac_cmp32[1]) && (mac_cmp16[0] == mac_cmp16[1]))
-		{
-			if (!ne2000->RCR.broadcast)
-			{
-				return;
-			}
-		}
-		else if (pktbuf[0] & 0x01)
-		{
-			if (! ne2000->RCR.multicast)
-			{
-				return;
-			}
-			idx = mcast_index(buf);
-			if (!(ne2000->mchash[idx >> 3] & (1 << (idx & 0x7))))
-			{
-				return;
-			}
-		}
-		else if (0 != memcmp(buf, ne2000->physaddr, 6))
-		{
-			return;
-		}
+        if (!memcmp(buf, bcast_addr, 6))
+        {
+            if (! ne2000->RCR.broadcast) 
+            {
+                return;
+            }
+        }
+        else if (pktbuf[0] & 0x01) 
+        {
+            if (! ne2000->RCR.multicast) 
+            {
+                return;
+            }
+            idx = mcast_index(buf);
+            if (!(ne2000->mchash[idx >> 3] & (1 << (idx & 0x7)))) 
+            {
+                return;
+            }
+        }
+        else if (0 != memcmp(buf, ne2000->physaddr, 6)) 
+        {
+#ifdef ENABLE_PACKET_TRACER
+            pkttrc_log("rx_frame %d was not for us? %x:%x:%x:%x:%x:%x\n", io_len, pktbuf[0], pktbuf[1], pktbuf[2], pktbuf[3], pktbuf[4], pktbuf[5], pktbuf[6]);
+#else
+            ne2000_log("rx_frame %d was not for us? %x:%x:%x:%x:%x:%x\n", io_len, pktbuf[0], pktbuf[1], pktbuf[2], pktbuf[3], pktbuf[4], pktbuf[5], pktbuf[6]);
+#endif
+            return;
+        }
 	}
 	else
 	{
-		ne2000_log("rx_frame promiscuous receive\n");
+#ifdef ENABLE_PACKET_TRACER
+        pkttrc_log("rx_frame promiscuous receive\n");
+#else
+        ne2000_log("rx_frame promiscuous receive\n");
+#endif
 	}
-
+#ifdef ENABLE_PACKET_TRACER
+    pkttrc_log("rx_frame %d to %x:%x:%x:%x:%x:%x from %x:%x:%x:%x:%x:%x\n", io_len, pktbuf[0], pktbuf[1], pktbuf[2], pktbuf[3], pktbuf[4], pktbuf[5], pktbuf[6], pktbuf[7], pktbuf[8], pktbuf[9], pktbuf[10], pktbuf[11]);
+#else
     ne2000_log("rx_frame %d to %x:%x:%x:%x:%x:%x from %x:%x:%x:%x:%x:%x\n", io_len, pktbuf[0], pktbuf[1], pktbuf[2], pktbuf[3], pktbuf[4], pktbuf[5], pktbuf[6], pktbuf[7], pktbuf[8], pktbuf[9], pktbuf[10], pktbuf[11]);
+#endif
 
 	nextpage = ne2000->curr_page + pages;
 	if (nextpage >= ne2000->page_stop)
@@ -1936,15 +1944,15 @@ void ne2000_rx_frame(void *p, const void *buf, int io_len)
 	startptr = & ne2000->mem[ne2000->curr_page * 256 - BX_NE2K_MEMSTART];
 	if ((nextpage > ne2000->curr_page) || ((ne2000->curr_page + pages) == ne2000->page_stop))
 	{
-		*(uint32_t *) startptr = *(uint32_t *) pkthdr;
+        memcpy(startptr, pkthdr, 4);
 		memcpy(startptr + 4, buf, io_len);
 		ne2000->curr_page = nextpage;
 	}
 	else
 	{
 		int endbytes = (ne2000->page_stop - ne2000->curr_page) * 256;
-		*(uint32_t *) startptr = *(uint32_t *) pkthdr;
-		memcpy(startptr + 4, buf, endbytes - 4);
+        memcpy(startptr, pkthdr, 4);
+        memcpy(startptr + 4, buf, endbytes - 4);
 		startptr = & ne2000->mem[ne2000->page_start * 256 - BX_NE2K_MEMSTART];
 		memcpy(startptr, (void *)(pktbuf + endbytes - 4), io_len - endbytes + 8);
 		ne2000->curr_page = nextpage;
@@ -2036,7 +2044,7 @@ void ne2000_poller(void *p)
                 return;
             }
 
-            if (incomingPacket.connected == FALSE)
+            if (incomingPkt.connected == FALSE)
                 return;
 
             int active = SDLNet_CheckSockets(clientSocketSet, 0);
@@ -2094,13 +2102,13 @@ void ne2000_poller(void *p)
                                 memcpy(compressedData, buf + sizeof(handshake_hdr), compressedSize);
 
                                 /* decompress data */
-                                uint8_t *rawData = (uint8_t *)malloc(dataLength);
+                                uint8_t *inFrame = (uint8_t *)malloc(dataLength);
                                 unsigned long decompLength = dataLength;
-                                uncompress(rawData, &decompLength, compressedData, compressedSize);
+                                uncompress(inFrame, &decompLength, compressedData, compressedSize);
                                 free(compressedData);
 
                                 /* check data checksum */
-                                uint8_t checksum = packetCRC(&rawData[0], dataLength);
+                                uint8_t checksum = packetCRC(&inFrame[0], dataLength);
                                 if (hdr->checkSum != checksum)
                                 {
                                     ne2000_log("bad packet, CRC mismatch [%x, expected %x][decomp len %d, len %d]\n", checksum, hdr->checkSum,
@@ -2111,12 +2119,13 @@ void ne2000_poller(void *p)
                                     return;
                                 }
 #ifdef ENABLE_PACKET_TRACER
-                                hexDump("rawData", rawData, dataLength);
+                                hexDump("inFrame", inFrame, dataLength);
+                                pkttrc_log("inFrame length %d\n", dataLength);
 #endif
 
                                 /* push packet onto NE2000 frame buffer */
-                                ne2000_rx_frame(ne2000, rawData, dataLength);
-                                free(rawData);
+                                ne2000_rx_frame(ne2000, inFrame, dataLength);
+                                free(inFrame);
                             }
 #ifdef ENABLE_PACKET_TRACER
                             pkttrc_log("[bytes read %d]\n", len);
