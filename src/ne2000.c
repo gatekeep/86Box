@@ -47,10 +47,10 @@
 
 #include "SDLnet/SDL_net.h"
 
-#define ENABLE_NE2000_LOG
+#define TRUE 1
+#define FALSE 0
 
 #define RX_BUF_SIZE 65535
-
 #define PKT_MAGIC 0x4958
 
 typedef struct handshake_hdr {
@@ -274,15 +274,21 @@ uint32_t ne2000_chipmem_read(ne2000_t *ne2000, uint32_t address, unsigned int io
 void ne2000_page0_write(ne2000_t *ne2000, uint32_t offset, uint32_t value, unsigned io_len);
 void ne2000_rx_frame(void *p, const void *buf, int io_len);
 
+//#define ENABLE_NE2000_LOG
+#ifdef ENABLE_NE2000_LOG
 int ne2000_do_log = 1;
+#else
+int ne2000_do_log = 0;
+#endif
 FILE* ne2000log = NULL;
 
 void ne2000_log(const char *format, ...)
 {
+#ifdef ENABLE_NE2000_LOG
     if (ne2000log == NULL)
         ne2000log = fopen("ne2000.log", "w");
-#ifdef ENABLE_NE2000_LOG
-	if (ne2000_do_log)
+    
+    if (ne2000_do_log)
 	{
 		va_list ap;
 		va_start(ap, format);
@@ -292,9 +298,6 @@ void ne2000_log(const char *format, ...)
 	}
 #endif
 }
-
-#define TRUE 1
-#define FALSE 0
 
 void DisconnectFromServer(int unexpected)
 {
