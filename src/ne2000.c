@@ -276,11 +276,7 @@ void ne2000_page0_write(ne2000_t *ne2000, uint32_t offset, uint32_t value, unsig
 void ne2000_rx_frame(void *p, const void *buf, int io_len);
 
 //#define ENABLE_NE2000_LOG
-#ifdef ENABLE_NE2000_LOG
-int ne2000_do_log = 1;
-#else
-int ne2000_do_log = 0;
-#endif
+#define ENABLE_PACKET_TRACER
 FILE* ne2000log = NULL;
 
 void ne2000_log(const char *format, ...)
@@ -289,14 +285,25 @@ void ne2000_log(const char *format, ...)
     if (ne2000log == NULL)
         ne2000log = fopen("ne2000.log", "w");
     
-    if (ne2000_do_log)
-	{
-		va_list ap;
-		va_start(ap, format);
-		vfprintf(ne2000log, format, ap);
-		va_end(ap);
-		fflush(ne2000log);
-	}
+	va_list ap;
+	va_start(ap, format);
+	vfprintf(ne2000log, format, ap);
+	va_end(ap);
+	fflush(ne2000log);
+#endif
+}
+
+void pkttrc_log(const char *format, ...)
+{
+#ifdef ENABLE_PACKET_TRACER
+    if (ne2000log == NULL)
+        ne2000log = fopen("ne2000.log", "w");
+
+    va_list ap;
+    va_start(ap, format);
+    vfprintf(ne2000log, format, ap);
+    va_end(ap);
+    fflush(ne2000log);
 #endif
 }
 
@@ -371,6 +378,13 @@ int ConnectToServer(char const *strAddr, uint16_t tcpPort)
             regHeader->macAddr[4] = 0;
             regHeader->macAddr[5] = 0;
 
+            if ((maclocal[3] != 0x88) && (maclocal[4] != 0xBB) && (maclocal[5] != 0xAA))
+            {
+                regHeader->macAddr[3] = maclocal[3];
+                regHeader->macAddr[4] = maclocal[4];
+                regHeader->macAddr[5] = maclocal[5];
+            }
+
             regHeader->length = sizeof(regHeader);
 
             // Send registration string to server.  If server doesn't get
@@ -441,7 +455,7 @@ int ConnectToServer(char const *strAddr, uint16_t tcpPort)
     return FALSE;
 }
 
-#ifdef ENABLE_NE2000_LOG
+#ifdef ENABLE_PACKET_TRACER
 static void hexDump(char *desc, const void *addr, int len)
 {
     int i;
@@ -450,7 +464,7 @@ static void hexDump(char *desc, const void *addr, int len)
 
     // Output description if given.
     if (desc != NULL)
-        ne2000_log("%s:\n", desc);
+        pkttrc_log("%s:\n", desc);
 
     // Process every byte in the data.
     for (i = 0; i < len; i++) {
@@ -459,14 +473,14 @@ static void hexDump(char *desc, const void *addr, int len)
         if ((i % 16) == 0) {
             // Just don't print ASCII for the zeroth line.
             if (i != 0)
-                ne2000_log("  %s\n", buff);
+                pkttrc_log("  %s\n", buff);
 
             // Output the offset.
-            ne2000_log("  %04x ", i);
+            pkttrc_log("  %04x ", i);
         }
 
         // Now the hex code for the specific character.
-        ne2000_log(" %02x", pc[i]);
+        pkttrc_log(" %02x", pc[i]);
 
         // And store a printable ASCII character for later.
         if ((pc[i] < 0x20) || (pc[i] > 0x7e))
@@ -478,19 +492,37 @@ static void hexDump(char *desc, const void *addr, int len)
 
     // Pad out last line if not exactly 16 characters.
     while ((i % 16) != 0) {
-        ne2000_log("   ");
+        pkttrc_log("   ");
         i++;
     }
 
     // And print the final ASCII bit.
-    ne2000_log("  %s\n", buff);
+    pkttrc_log("  %s\n", buff);
 }
 #endif
 
 static void sendPacket(uint8_t *packetData, uint16_t packetsize)
 {
     if (incomingPacket.connected == FALSE)
-        return;
+    {
+        const char* serverAddr = config_get_string(NULL, "vpn_server", "nothing");
+        int serverPort = config_get_int(NULL, "vpn_port", 0);
+        if (!strcmp("nothing", serverAddr))
+        {
+            net_is_vpn = 0;
+            ne2000_log("vpn no server\n");
+            return;
+        }
+        if (config_get_int(NULL, "vpn_port", 0) == 0)
+        {
+            net_is_vpn = 0;
+            ne2000_log("vpn no port\n");
+            return;
+        }
+
+        if (ConnectToServer(serverAddr, (uint16_t)serverPort) == FALSE)
+            return;
+    }
 
     handshake_hdr *hdr = malloc(sizeof(handshake_hdr));
     unsigned long compressedSize = compressBound(packetsize);
@@ -530,21 +562,21 @@ static void sendPacket(uint8_t *packetData, uint16_t packetsize)
         return;
     }
 
-#ifdef ENABLE_NE2000_LOG
-    ne2000_log("[SNIP .. Packet Tx to Server]\n");
+#ifdef ENABLE_PACKET_TRACER
+    pkttrc_log("[SNIP .. Packet Tx to Server]\n");
     hexDump("hdr", hdr, sizeof(handshake_hdr));
     hexDump("outPacket", packetData, packetsize);
-    ne2000_log("outPacket length %d\n", packetsize);
+    pkttrc_log("outPacket length %d\n", packetsize);
     hexDump("outputData", outputData, hdr->length);
-    ne2000_log("hdr->magic = %x\n", hdr->magic);
-    ne2000_log("hdr->checksum = %x\n", hdr->checkSum);
-    ne2000_log("hdr->length = %d\n", hdr->length);
-    ne2000_log("hdr->macAddr = %x:%x:%x:%x:%x:%x\n", CONVMAC(hdr->macAddr));
-    ne2000_log("hdr->dataLength = %d\n", hdr->dataLength);
-    ne2000_log("hdr->compressLength = %d\n", hdr->compressLength);
-    ne2000_log("hdr length %d\n", sizeof(handshake_hdr));
-    ne2000_log("bytes written %d\n", len);
-    ne2000_log("[SNIP .. Packet Tx to Server]\n");
+    pkttrc_log("hdr->magic = %x\n", hdr->magic);
+    pkttrc_log("hdr->checksum = %x\n", hdr->checkSum);
+    pkttrc_log("hdr->length = %d\n", hdr->length);
+    pkttrc_log("hdr->macAddr = %x:%x:%x:%x:%x:%x\n", CONVMAC(hdr->macAddr));
+    pkttrc_log("hdr->dataLength = %d\n", hdr->dataLength);
+    pkttrc_log("hdr->compressLength = %d\n", hdr->compressLength);
+    pkttrc_log("hdr length %d\n", sizeof(handshake_hdr));
+    pkttrc_log("bytes written %d\n", len);
+    pkttrc_log("[SNIP .. Packet Tx to Server]\n");
 #endif
     free(outputData);
     free(hdr);
@@ -2018,7 +2050,11 @@ void ne2000_poller(void *p)
 
                     len = SDLNet_TCP_Recv(nicClientSocket, buf, RX_BUF_SIZE);
                     if (len == -1)
-                        ne2000_log("ne2000: %s\n", SDLNet_GetError());
+                    {
+                        ne2000_log("ne2000: failed to recv!\n");
+                        DisconnectFromServer(TRUE);
+                        return;
+                    }
                     if (len)
                     {
                         /* create and copy header */
@@ -2027,23 +2063,23 @@ void ne2000_poller(void *p)
 
                         if (hdr->magic == PKT_MAGIC)
                         {
-#ifdef ENABLE_NE2000_LOG
-                            ne2000_log("[SNIP .. Packet Rx from Server]\n");
+#ifdef ENABLE_PACKET_TRACER
+                            pkttrc_log("[SNIP .. Packet Rx from Server]\n");
                             hexDump("buf (128)", buf, 128);
                             hexDump("hdr", hdr, sizeof(handshake_hdr));
-                            ne2000_log("hdr->magic = %x\n", hdr->magic);
-                            ne2000_log("hdr->checksum = %x\n", hdr->checkSum);
-                            ne2000_log("hdr->length = %d\n", hdr->length);
-                            ne2000_log("hdr->macAddr = %x:%x:%x:%x:%x:%x\n", CONVMAC(hdr->macAddr));
-                            ne2000_log("hdr->dataLength = %d\n", hdr->dataLength);
-                            ne2000_log("hdr->compressLength = %d\n", hdr->compressLength);
-                            ne2000_log("hdr length %d\n", sizeof(handshake_hdr));
+                            pkttrc_log("hdr->magic = %x\n", hdr->magic);
+                            pkttrc_log("hdr->checksum = %x\n", hdr->checkSum);
+                            pkttrc_log("hdr->length = %d\n", hdr->length);
+                            pkttrc_log("hdr->macAddr = %x:%x:%x:%x:%x:%x\n", CONVMAC(hdr->macAddr));
+                            pkttrc_log("hdr->dataLength = %d\n", hdr->dataLength);
+                            pkttrc_log("hdr->compressLength = %d\n", hdr->compressLength);
+                            pkttrc_log("hdr length %d\n", sizeof(handshake_hdr));
 #endif
                             if (len < hdr->length)
                             {
                                 ne2000_log("invalid packet length! [expected %d, got %d]\n", hdr->length, len);
-#ifdef ENABLE_NE2000_LOG
-                                ne2000_log("[SNIP .. Packet Rx from Server]\n");
+#ifdef ENABLE_PACKET_TRACER
+                                pkttrc_log("[SNIP .. Packet Rx from Server]\n");
 #endif
                                 return;
                             }
@@ -2069,12 +2105,12 @@ void ne2000_poller(void *p)
                                 {
                                     ne2000_log("bad packet, CRC mismatch [%x, expected %x][decomp len %d, len %d]\n", checksum, hdr->checkSum,
                                         decompLength, dataLength);
-#ifdef ENABLE_NE2000_LOG
-                                    ne2000_log("[SNIP .. Packet Rx from Server]\n");
+#ifdef ENABLE_PACKET_TRACER
+                                    pkttrc_log("[SNIP .. Packet Rx from Server]\n");
 #endif
                                     return;
                                 }
-#ifdef ENABLE_NE2000_LOG
+#ifdef ENABLE_PACKET_TRACER
                                 hexDump("rawData", rawData, dataLength);
 #endif
 
@@ -2082,9 +2118,9 @@ void ne2000_poller(void *p)
                                 ne2000_rx_frame(ne2000, rawData, dataLength);
                                 free(rawData);
                             }
-#ifdef ENABLE_NE2000_LOG
-                            ne2000_log("[bytes read %d]\n", len);
-                            ne2000_log("[SNIP .. Packet Rx from Server]\n");
+#ifdef ENABLE_PACKET_TRACER
+                            pkttrc_log("[bytes read %d]\n", len);
+                            pkttrc_log("[SNIP .. Packet Rx from Server]\n");
 #endif
                         }
                         free(hdr);

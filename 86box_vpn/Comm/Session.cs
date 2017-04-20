@@ -147,17 +147,17 @@ namespace EightSixBoxVPN.Comm
                 return;
             if (!client.Connected)
                 return;
-
-            // is this our mac?
-            if (PhysicalAddress.ToString() != pdu.Header.MacAddr.ToString())
-                return;
-
 #if TRACE
-            Messages.Trace("session [" + PhysicalAddress.ToString() + "] destHW [" + pdu.Header.MacAddr.ToString() + "]");
+            Messages.Trace("dest [" + PhysicalAddress.ToString() + "] src [" + pdu.Header.MacAddr[0].ToString("X") +
+                    pdu.Header.MacAddr[1].ToString("X") +
+                    pdu.Header.MacAddr[2].ToString("X") +
+                    pdu.Header.MacAddr[3].ToString("X") +
+                    pdu.Header.MacAddr[4].ToString("X") +
+                    pdu.Header.MacAddr[5].ToString("X") + "]");
 #if DUMP_ALL
             if (pdu != null)
             {
-                Messages.Trace("[SNIP .. Packet Rx from Client]");
+                Messages.Trace("[SNIP .. Packet Tx To " + PhysicalAddress.ToString() + "]");
                 Messages.TraceHex("hdr", pdu.HeaderData, pdu.HeaderData.Length);
                 if (pdu.ContentData != null)
                 {
@@ -175,7 +175,7 @@ namespace EightSixBoxVPN.Comm
                     pdu.Header.MacAddr[5].ToString("X"));
                 Messages.Trace("hdr->dataLength = " + pdu.Header.DataLength);
                 Messages.Trace("hdr->compressLength = " + pdu.Header.CompressedLength);
-                Messages.Trace("[SNIP .. Packet Rx from Client]");
+                Messages.Trace("[SNIP .. Packet Tx To " + PhysicalAddress.ToString() + "]");
             }
 #endif
 #endif
@@ -183,7 +183,8 @@ namespace EightSixBoxVPN.Comm
             HandshakeHeader header = new HandshakeHeader();
             header.CRC = PacketCRC(pdu.ContentData, pdu.ContentData.Length);
             header.DataLength = (ushort)pdu.ContentData.Length;
-            header.MacAddr = this.macAddress;
+            //header.MacAddr = this.macAddress;
+            header.MacAddr = pdu.Header.MacAddr;
 
             // compress data
             byte[] compressedData = ZStream.CompressBuffer(pdu.ContentData);
@@ -220,7 +221,7 @@ namespace EightSixBoxVPN.Comm
 #if TRACE && DUMP_ALL
                 if (pdu != null)
                 {
-                    Messages.Trace("[SNIP .. Packet Rx from Client]");
+                    Messages.Trace("[SNIP .. Packet Rx from " + PhysicalAddress.ToString() + "]");
                     Messages.TraceHex("hdr", pdu.HeaderData, pdu.HeaderData.Length);
                     if (pdu.ContentData != null)
                     {
@@ -238,7 +239,7 @@ namespace EightSixBoxVPN.Comm
                         pdu.Header.MacAddr[5].ToString("X"));
                     Messages.Trace("hdr->dataLength = " + pdu.Header.DataLength);
                     Messages.Trace("hdr->compressLength = " + pdu.Header.CompressedLength);
-                    Messages.Trace("[SNIP .. Packet Rx from Client]");
+                    Messages.Trace("[SNIP .. Packet Rx from " + PhysicalAddress.ToString() + "]");
                 }
 #endif
 
@@ -273,10 +274,24 @@ namespace EightSixBoxVPN.Comm
                         node[1] = 0xDE;
                         node[2] = 0x48;
 
-                        Random rand = new Random();
-                        node[3] = (byte)rand.Next(255);
-                        node[4] = (byte)rand.Next(255);
-                        node[5] = (byte)rand.Next(255);
+                        // maybe this is a reconnect? we have the last 3 of an assigned MAC
+                        if ((pdu.Header.MacAddr[3] != 0) && (pdu.Header.MacAddr[4] != 0) && (pdu.Header.MacAddr[5] != 0))
+                        {
+                            Messages.WriteWarning("session reconnect? we recieved the last 3 " +
+                                pdu.Header.MacAddr[3].ToString("X") + ":" +
+                                pdu.Header.MacAddr[4].ToString("X") + ":" +
+                                pdu.Header.MacAddr[5].ToString("X"));
+                            node[3] = pdu.Header.MacAddr[3];
+                            node[4] = pdu.Header.MacAddr[4];
+                            node[5] = pdu.Header.MacAddr[5];
+                        }
+                        else
+                        {
+                            Random rand = new Random();
+                            node[3] = (byte)rand.Next(255);
+                            node[4] = (byte)rand.Next(255);
+                            node[5] = (byte)rand.Next(255);
+                        }
 
                         header.MacAddr = node;
                         this.macAddress = node;

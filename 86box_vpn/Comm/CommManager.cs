@@ -207,12 +207,14 @@ namespace EightSixBoxVPN.Comm
         {
             foreach (Session session in sessions)
             {
-                // don't rebroadcast to ourselves
-                if (session.MAC.ToString() == pdu.Header.MacAddr.ToString())
+                if ((session.MAC[3] == pdu.Header.MacAddr[3]) &&
+                    (session.MAC[4] == pdu.Header.MacAddr[4]) &&
+                    (session.MAC[5] == pdu.Header.MacAddr[5]))
                 {
-                    Messages.Trace("refusing to retransmit packet to sender ...");
+                    Messages.Trace("skipping transmit loopback ...");
                     continue;
                 }
+
                 session.HandleIncoming(pdu);
             }
         }
