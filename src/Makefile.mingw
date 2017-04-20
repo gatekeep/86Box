@@ -1,4 +1,4 @@
-VPATH = . dosbox lzf resid-fp slirp
+VPATH = . dosbox lzf resid-fp slirp zlib SDLnet
 CPP  = g++.exe
 CC   = gcc.exe
 WINDRES = windres.exe
@@ -21,20 +21,22 @@ OBJ = 386.o 386_dynarec.o 386_dynarec_ops.o 808x.o acer386sx.o acerm3a.o ali1429
 	vid_svga_render.o vid_tandy.o vid_tandysl.o vid_tgui9440.o vid_tkd8001_ramdac.o vid_tvga.o vid_unk_ramdac.o \
 	vid_vga.o vid_wy700.o vid_voodoo.o video.o w83877f.o wd76c10.o win.o win-config.o win-d3d.o win-d3d-fs.o win-ddraw.o \
 	win-ddraw-fs.o win-ddraw-screenshot.o win-deviceconfig.o win-hdconf.o win-joystick.o win-joystickconfig.o win-keyboard.o win-midi.o win-mouse.o \
-	win-status.o win-video.o x86seg.o x87.o xtide.o pc.res
+	win-status.o win-video.o x86seg.o x87.o xtide.o pc.res \
+	adler32.o compress.o crc32.o deflate.o gzclose.o gzlib.o gzread.o gzwrite.o infback.o inffast.o inflate.o inftrees.o trees.o uncompr.o zutil.o \
+	SDL_stdlib.o SDL_malloc.o SDL_string.o \
+	SDLnet.o SDLnetselect.o SDLnetTCP.o SDLnetUDP.o
 DBOBJ = dbopl.o nukedopl.o vid_cga_comp.o
 LZFOBJ = lzf_c.o lzf_d.o
 SIDOBJ = convolve.o convolve-sse.o envelope.o extfilt.o filter.o pot.o sid.o voice.o wave6581__ST.o wave6581_P_T.o wave6581_PS_.o wave6581_PST.o wave8580__ST.o wave8580_P_T.o wave8580_PS_.o wave8580_PST.o wave.o
 SLIRPOBJ = bootp.o ip_icmp.o misc.o socket.o tcp_timer.o cksum.o ip_input.o queue.o tcp_input.o tftp.o debug.o ip_output.o sbuf.o tcp_output.o udp.o if.o mbuf.o slirp.o tcp_subr.o
 
-
-LIBS = -mwindows -lwinmm -lopenal.dll -lopenal -lddraw -ldinput8 -ldxguid -ld3d9 -ld3dx9 -lwsock32 -liphlpapi -lstdc++ -lpsapi -static-libstdc++ -static-libgcc -static -lwpcapdelay
+LIBS = -mwindows -lmingw32 -lwinmm -lopenal32.dll -lddraw -ldinput8 -ldxguid -ld3d9 -ld3dx9 -lwsock32 -liphlpapi -lstdc++ -lpsapi -static-libstdc++ -static-libgcc -static -lwpcap
 
 86Box.exe: $(OBJ) $(DBOBJ) $(LZFOBJ) $(SIDOBJ) $(SLIRPOBJ)
 	$(CC) $(OBJ) $(DBOBJ) $(LZFOBJ) $(SIDOBJ) $(SLIRPOBJ) -o "86Box.exe" $(LIBS)
-	sleep 10
-	strip "86Box.exe"
-	sleep 10
+#	sleep 10
+#	strip "86Box.exe"
+#	sleep 10
 
 all : 86Box.exe
 

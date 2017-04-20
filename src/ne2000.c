@@ -43,8 +43,48 @@
 #include "pic.h"
 #include "timer.h"
 
+#include "zlib/zlib.h"
+
+#include "SDLnet/SDL_net.h"
+
+#define ENABLE_NE2000_LOG
+
+#define RX_BUF_SIZE 65535
+
+#define PKT_MAGIC 0x4958
+
+typedef struct handshake_hdr {
+    uint16_t magic;
+    uint8_t checkSum;
+    uint16_t dataLength;
+    uint16_t compressLength;
+    uint8_t macAddr[6];
+    uint16_t length;
+} handshake_hdr;
+
+typedef struct packetBuffer {
+    uint8_t buffer[1024];
+    uint16_t packetSize;  // Packet size remaining in read
+    uint16_t packetRead;  // Bytes read of total packet
+    int inPacket;      // In packet reception flag
+    int connected;		// Connected flag
+    int waitsize;
+} packetBuffer;
+
+IPaddress nicServConnIp;			// IPAddress for client connection to server
+TCPsocket nicClientSocket;
+
+SDLNet_SocketSet clientSocketSet;
+packetBuffer incomingPacket;
+
+#define SOCKETTABLESIZE 16
+#define CONVIP(hostvar) hostvar & 0xff, (hostvar >> 8) & 0xff, (hostvar >> 16) & 0xff, (hostvar >> 24) & 0xff
+#define CONVMAC(hostvar) hostvar[0], hostvar[1], hostvar[2], hostvar[3], hostvar[4], hostvar[5]
+
+uint8_t packetCRC(uint8_t *buffer, uint16_t bufSize);
+
 //THIS IS THE DEFAULT MAC ADDRESS .... so it wont place nice with multiple VMs. YET.
-uint8_t maclocal[6] = {0xac, 0xde, 0x48, 0x88, 0xbb, 0xaa};
+uint8_t maclocal[6] = {0xAC, 0xDE, 0x48, 0x88, 0xBB, 0xAA};
 
 #define NETBLOCKING 0           //we won't block our pcap
 
@@ -53,6 +93,8 @@ pcap_t *net_pcap;
 queueADT        slirpq;
 int net_slirp_inited=0;
 int net_is_pcap=0;      //and pretend pcap is dead.
+int net_is_vpn = 0;
+int is_connected_vpn = 0;
 int fizz=0;
 void slirp_tic();
 
@@ -232,20 +274,287 @@ uint32_t ne2000_chipmem_read(ne2000_t *ne2000, uint32_t address, unsigned int io
 void ne2000_page0_write(ne2000_t *ne2000, uint32_t offset, uint32_t value, unsigned io_len);
 void ne2000_rx_frame(void *p, const void *buf, int io_len);
 
-int ne2000_do_log = 0;
+int ne2000_do_log = 1;
+FILE* ne2000log = NULL;
 
 void ne2000_log(const char *format, ...)
 {
+    if (ne2000log == NULL)
+        ne2000log = fopen("ne2000.log", "w");
 #ifdef ENABLE_NE2000_LOG
 	if (ne2000_do_log)
 	{
 		va_list ap;
 		va_start(ap, format);
-		vprintf(format, ap);
+		vfprintf(ne2000log, format, ap);
 		va_end(ap);
-		fflush(stdout);
+		fflush(ne2000log);
 	}
 #endif
+}
+
+#define TRUE 1
+#define FALSE 0
+
+void DisconnectFromServer(int unexpected)
+{
+    if (unexpected)
+        ne2000_log("ne2000: server disconnected unexpectedly\n");
+    if (incomingPacket.connected != FALSE)
+    {
+        handshake_hdr *regHeader = malloc(sizeof(handshake_hdr));
+        regHeader->magic = PKT_MAGIC;
+
+        regHeader->checkSum = 0xFA;
+        regHeader->dataLength = 0xFFFF;
+
+        regHeader->macAddr[0] = 0;
+        regHeader->macAddr[1] = 0;
+        regHeader->macAddr[2] = 0;
+        regHeader->macAddr[3] = 0;
+        regHeader->macAddr[4] = 0;
+        regHeader->macAddr[5] = 0;
+
+        regHeader->length = sizeof(regHeader);
+
+        // send shutdown string to server
+        SDLNet_TCP_Send(nicClientSocket, regHeader, sizeof(handshake_hdr));
+
+        incomingPacket.connected = FALSE;
+        SDLNet_TCP_Close(nicClientSocket);
+        free(regHeader);
+    }
+}
+
+int ConnectToServer(char const *strAddr, uint16_t tcpPort)
+{
+    int numsent;
+    handshake_hdr *regHeader = malloc(sizeof(handshake_hdr));
+    int WSAErrno;
+
+    if (!SDLNet_ResolveHost(&nicServConnIp, strAddr, (uint16_t)tcpPort))
+    {
+        // Generate the MAC address.  This is made by zeroing out the first two
+        // octets and then using the actual IP address for the last 4 octets.
+        // This idea is from the IPX over IP implementation as specified in RFC 1234:
+        // http://www.faqs.org/rfcs/rfc1234.html
+
+        // Select an anonymous TCP port
+        nicClientSocket = SDLNet_TCP_Open(&nicServConnIp);
+        if (nicClientSocket)
+        {
+            // allocate memory for socket
+            clientSocketSet = SDLNet_AllocSocketSet(1);
+
+            // add server to socket set
+            int numused = SDLNet_TCP_AddSocket(clientSocketSet, nicClientSocket);
+            if (numused == -1)
+            {
+                ne2000_log("ne2000: SDLNet_AddSocket: %s\n", SDLNet_GetError());
+                // perhaps you need to restart the set and make it bigger...
+            }
+
+            regHeader->magic = PKT_MAGIC;
+
+            regHeader->checkSum = 0xFF;
+            regHeader->dataLength = 0;
+            regHeader->compressLength = 0;
+
+            regHeader->macAddr[0] = 0;
+            regHeader->macAddr[1] = 0;
+            regHeader->macAddr[2] = 0;
+            regHeader->macAddr[3] = 0;
+            regHeader->macAddr[4] = 0;
+            regHeader->macAddr[5] = 0;
+
+            regHeader->length = sizeof(regHeader);
+
+            // Send registration string to server.  If server doesn't get
+            // this, client will not be registered
+            numsent = SDLNet_TCP_Send(nicClientSocket, regHeader, sizeof(handshake_hdr));
+            if (!numsent)
+            {
+                incomingPacket.connected = FALSE;
+                ne2000_log("ne2000: unable to connect to server: %s\n", SDLNet_GetError());
+                SDLNet_TCP_Close(nicClientSocket);
+                return FALSE;
+            }
+            else
+            {
+                // Wait for return packet from server.
+                // This will contain our IPX address and port num
+                int result;
+                int elapsed = 0;
+
+                while (TRUE)
+                {
+                    if (elapsed > 10000)
+                    {
+                        ne2000_log("ne2000: timeout connecting to server at %s (%s)\n", strAddr, SDLNet_GetError());
+                        SDLNet_TCP_Close(nicClientSocket);
+                        return FALSE;
+                    }
+
+                    result = SDLNet_TCP_Recv(nicClientSocket, regHeader, sizeof(handshake_hdr));
+                    if (result == -1)
+                        ne2000_log("ne2000: failed to recieve from server!\n");
+                    if (result != 0)
+                    {
+                        if (regHeader->magic != PKT_MAGIC)
+                        {
+                            ne2000_log("ne2000: invalid packet magic\n");
+                            continue;
+                        }
+
+                        memcpy(maclocal, regHeader->macAddr, sizeof(maclocal));
+                        break;
+                    }
+
+                    elapsed++;
+                }
+
+                ne2000_log("ne2000: connected to server.  MAC address is %x:%x:%x:%x:%x:%x\n", CONVMAC(maclocal));
+
+                free(regHeader);
+                incomingPacket.connected = TRUE;
+                return TRUE;
+            }
+        }
+        else
+        {
+            incomingPacket.connected = FALSE;
+            ne2000_log("ne2000: unable to open socket, %s\n", SDLNet_GetError());
+            WSAErrno = WSAGetLastError();
+        }
+    }
+    else
+    {
+        incomingPacket.connected = FALSE;
+        ne2000_log("ne2000: Unable resolve connection to server %s\n", SDLNet_GetError());
+    }
+
+    free(regHeader);
+    return FALSE;
+}
+
+#ifdef ENABLE_NE2000_LOG
+static void hexDump(char *desc, const void *addr, int len)
+{
+    int i;
+    unsigned char buff[17];
+    unsigned char *pc = (unsigned char *)addr;
+
+    // Output description if given.
+    if (desc != NULL)
+        ne2000_log("%s:\n", desc);
+
+    // Process every byte in the data.
+    for (i = 0; i < len; i++) {
+        // Multiple of 16 means new line (with line offset).
+
+        if ((i % 16) == 0) {
+            // Just don't print ASCII for the zeroth line.
+            if (i != 0)
+                ne2000_log("  %s\n", buff);
+
+            // Output the offset.
+            ne2000_log("  %04x ", i);
+        }
+
+        // Now the hex code for the specific character.
+        ne2000_log(" %02x", pc[i]);
+
+        // And store a printable ASCII character for later.
+        if ((pc[i] < 0x20) || (pc[i] > 0x7e))
+            buff[i % 16] = '.';
+        else
+            buff[i % 16] = pc[i];
+        buff[(i % 16) + 1] = '\0';
+    }
+
+    // Pad out last line if not exactly 16 characters.
+    while ((i % 16) != 0) {
+        ne2000_log("   ");
+        i++;
+    }
+
+    // And print the final ASCII bit.
+    ne2000_log("  %s\n", buff);
+}
+#endif
+
+static void sendPacket(uint8_t *packetData, uint16_t packetsize)
+{
+    if (incomingPacket.connected == FALSE)
+        return;
+
+    handshake_hdr *hdr = malloc(sizeof(handshake_hdr));
+    unsigned long compressedSize = compressBound(packetsize);
+    uint8_t *compressedPacket = (uint8_t *)malloc(compressedSize);
+
+    /* compress packet */
+    int zErr;
+    if ((zErr = compress(compressedPacket, &compressedSize, packetData, packetsize)) != Z_OK)
+        ne2000_log("ne2000: failed to compress outgoing packet\n");
+
+    /* create packet header */
+    hdr->magic = PKT_MAGIC;
+    hdr->checkSum = packetCRC(&packetData[0], packetsize);
+    hdr->dataLength = packetsize;
+    hdr->compressLength = (uint16_t)compressedSize;
+    memcpy(hdr->macAddr, maclocal, sizeof(maclocal));
+    hdr->length = (uint16_t)compressedSize + sizeof(handshake_hdr);
+
+    uint8_t *outputData = (uint8_t *)malloc(hdr->length);
+    memset(outputData, 0, hdr->length);
+
+    /* add packet header to output data */
+    memcpy(outputData, hdr, sizeof(handshake_hdr));
+
+    /* copy actual packet data to output */
+    memcpy(outputData + sizeof(handshake_hdr), compressedPacket, compressedSize);
+
+    // Since we're using a channel, we won't send the IP address again
+    int len = SDLNet_TCP_Send(nicClientSocket, outputData, hdr->length);
+    if (len == 0)
+    {
+        ne2000_log("ne2000: could not send packet: %s\n", SDLNet_GetError());
+        free(outputData);
+        free(hdr);
+        free(compressedPacket);
+        DisconnectFromServer(TRUE);
+        return;
+    }
+
+#ifdef ENABLE_NE2000_LOG
+    ne2000_log("[SNIP .. Packet Tx to Server]\n");
+    hexDump("hdr", hdr, sizeof(handshake_hdr));
+    hexDump("outPacket", packetData, packetsize);
+    ne2000_log("outPacket length %d\n", packetsize);
+    hexDump("outputData", outputData, hdr->length);
+    ne2000_log("hdr->magic = %x\n", hdr->magic);
+    ne2000_log("hdr->checksum = %x\n", hdr->checkSum);
+    ne2000_log("hdr->length = %d\n", hdr->length);
+    ne2000_log("hdr->macAddr = %x:%x:%x:%x:%x:%x\n", CONVMAC(hdr->macAddr));
+    ne2000_log("hdr->dataLength = %d\n", hdr->dataLength);
+    ne2000_log("hdr->compressLength = %d\n", hdr->compressLength);
+    ne2000_log("hdr length %d\n", sizeof(handshake_hdr));
+    ne2000_log("bytes written %d\n", len);
+    ne2000_log("[SNIP .. Packet Tx to Server]\n");
+#endif
+    free(outputData);
+    free(hdr);
+    free(compressedPacket);
+}
+
+uint8_t packetCRC(uint8_t *buffer, uint16_t bufSize) {
+    uint8_t tmpCRC = 0;
+    uint16_t i;
+    for (i = 0; i<bufSize; i++) {
+        tmpCRC ^= *buffer;
+        buffer++;
+    }
+    return tmpCRC;
 }
 
 static void ne2000_setirq(ne2000_t *ne2000, int irq)
@@ -396,6 +705,13 @@ void ne2000_write_cr(ne2000_t *ne2000, uint32_t value)
 		{
 			ne2000_rx_frame(ne2000, &ne2000->mem[ne2000->tx_page_start*256 - BX_NE2K_MEMSTART], ne2000->tx_bytes);
 		}
+
+        if (network_card_current == 1) {
+            if (ne2000->IMR.tx_inte && !ne2000->ISR.pkt_tx) {
+                picint(1 << ne2000->base_irq);
+            }
+            ne2000->ISR.pkt_tx = 1;
+        }
 	}
 	else if (value & 0x04)
 	{
@@ -417,8 +733,16 @@ void ne2000_write_cr(ne2000_t *ne2000, uint32_t value)
 		ne2000->CR.tx_packet = 1;
 		if(!net_is_pcap)
 		{
-			slirp_input(&ne2000->mem[ne2000->tx_page_start*256 - BX_NE2K_MEMSTART], ne2000->tx_bytes);
-			ne2000_log("ne2000 slirp sending packet\n");
+            if (net_is_vpn)
+            {
+                sendPacket(&ne2000->mem[ne2000->tx_page_start * 256 - BX_NE2K_MEMSTART], ne2000->tx_bytes);
+                ne2000_log("ne2000 vpn sending packet\n");
+            }
+            else
+            {
+                slirp_input(&ne2000->mem[ne2000->tx_page_start * 256 - BX_NE2K_MEMSTART], ne2000->tx_bytes);
+                ne2000_log("ne2000 slirp sending packet\n");
+            }
 		}
 		else if (net_is_pcap && (net_pcap != NULL))
 		{
@@ -692,7 +1016,10 @@ void ne2000_asic_write(ne2000_t *ne2000, uint32_t offset, uint32_t value, unsign
 			break;
 
 		case 0xf:  // Reset register
-			// end of reset pulse
+            if (network_card_current == 1) {
+                ne2000_reset(ne2000, BX_RESET_SOFTWARE);
+            }
+            // end of reset pulse
 			break;
 
 		default: // this is invalid, but happens under win95 device detection
@@ -1663,23 +1990,125 @@ void ne2000_poller(void *p)
 	int res;
 	if (!net_is_pcap)
 	{
-		while(QueuePeek(slirpq) > 0)
-		{
-			qp=QueueDelete(slirpq);
-			if((ne2000->DCR.loop == 0) || (ne2000->TCR.loop_cntl != 0))
-			{
-				free(qp);
-				return;
-			}
-			ne2000_rx_frame(ne2000,&qp->data,qp->len); 
-			ne2000_log("ne2000 inQ:%d  got a %dbyte packet @%d\n",QueuePeek(slirpq),qp->len,qp);
-			free(qp);
-		}
-        fizz++;
-        if (fizz>1200)
-		{
-			fizz=0;slirp_tic();
-		}
+        if (net_is_vpn)
+        {
+            int len;
+
+            // don't receive in loopback modes
+            if ((ne2000->DCR.loop == 0) || (ne2000->TCR.loop_cntl != 0))
+            {
+                return;
+            }
+
+            if (incomingPacket.connected == FALSE)
+                return;
+
+            int active = SDLNet_CheckSockets(clientSocketSet, 0);
+
+            if (active > 0)
+            {
+                if (SDLNet_SocketReady(nicClientSocket))
+                {
+                    uint8_t *buf = (uint8_t *)malloc(RX_BUF_SIZE);
+                    memset(buf, 0, RX_BUF_SIZE);
+
+                    len = SDLNet_TCP_Recv(nicClientSocket, buf, RX_BUF_SIZE);
+                    if (len == -1)
+                        ne2000_log("ne2000: %s\n", SDLNet_GetError());
+                    if (len)
+                    {
+                        /* create and copy header */
+                        handshake_hdr *hdr = malloc(sizeof(handshake_hdr));
+                        memcpy(hdr, buf, sizeof(handshake_hdr));
+
+                        if (hdr->magic == PKT_MAGIC)
+                        {
+#ifdef ENABLE_NE2000_LOG
+                            ne2000_log("[SNIP .. Packet Rx from Server]\n");
+                            hexDump("buf (128)", buf, 128);
+                            hexDump("hdr", hdr, sizeof(handshake_hdr));
+                            ne2000_log("hdr->magic = %x\n", hdr->magic);
+                            ne2000_log("hdr->checksum = %x\n", hdr->checkSum);
+                            ne2000_log("hdr->length = %d\n", hdr->length);
+                            ne2000_log("hdr->macAddr = %x:%x:%x:%x:%x:%x\n", CONVMAC(hdr->macAddr));
+                            ne2000_log("hdr->dataLength = %d\n", hdr->dataLength);
+                            ne2000_log("hdr->compressLength = %d\n", hdr->compressLength);
+                            ne2000_log("hdr length %d\n", sizeof(handshake_hdr));
+#endif
+                            if (len < hdr->length)
+                            {
+                                ne2000_log("invalid packet length! [expected %d, got %d]\n", hdr->length, len);
+#ifdef ENABLE_NE2000_LOG
+                                ne2000_log("[SNIP .. Packet Rx from Server]\n");
+#endif
+                                return;
+                            }
+
+                            if ((hdr->dataLength > 0) && (hdr->compressLength > 0))
+                            {
+                                uint16_t dataLength = hdr->dataLength;
+                                uint16_t compressedSize = hdr->compressLength;
+
+                                /* copy compressed data */
+                                uint8_t *compressedData = (uint8_t *)malloc(compressedSize);
+                                memcpy(compressedData, buf + sizeof(handshake_hdr), compressedSize);
+
+                                /* decompress data */
+                                uint8_t *rawData = (uint8_t *)malloc(dataLength);
+                                unsigned long decompLength = dataLength;
+                                uncompress(rawData, &decompLength, compressedData, compressedSize);
+                                free(compressedData);
+
+                                /* check data checksum */
+                                uint8_t checksum = packetCRC(&rawData[0], dataLength);
+                                if (hdr->checkSum != checksum)
+                                {
+                                    ne2000_log("bad packet, CRC mismatch [%x, expected %x][decomp len %d, len %d]\n", checksum, hdr->checkSum,
+                                        decompLength, dataLength);
+#ifdef ENABLE_NE2000_LOG
+                                    ne2000_log("[SNIP .. Packet Rx from Server]\n");
+#endif
+                                    return;
+                                }
+#ifdef ENABLE_NE2000_LOG
+                                hexDump("rawData", rawData, dataLength);
+#endif
+
+                                /* push packet onto NE2000 frame buffer */
+                                ne2000_rx_frame(ne2000, rawData, dataLength);
+                                free(rawData);
+                            }
+#ifdef ENABLE_NE2000_LOG
+                            ne2000_log("[bytes read %d]\n", len);
+                            ne2000_log("[SNIP .. Packet Rx from Server]\n");
+#endif
+                        }
+                        free(hdr);
+                    }
+                    free(buf);
+                }
+            }
+        }
+        else
+        {
+            while (QueuePeek(slirpq) > 0)
+            {
+                qp = QueueDelete(slirpq);
+                if ((ne2000->DCR.loop == 0) || (ne2000->TCR.loop_cntl != 0))
+                {
+                    free(qp);
+                    return;
+                }
+                ne2000_rx_frame(ne2000, &qp->data, qp->len);
+                ne2000_log("ne2000 inQ:%d  got a %dbyte packet @%d\n", QueuePeek(slirpq), qp->len, qp);
+                free(qp);
+            }
+            fizz++;
+            if (fizz > 1200)
+            {
+                fizz = 0; slirp_tic();
+            }
+        }
 	}//end slirp
 	else if (net_is_pcap && (net_pcap != NULL))
 	{
@@ -1967,6 +2396,10 @@ void *ne2000_init()
 		ne2000->base_address = device_get_config_int("addr");
 	}
 
+    if (SDLNet_Init() == -1) {
+        ne2000_log("failed SDLNet_Init\n");
+    }
+
 	disable_netbios = device_get_config_int("disable_netbios");
 
 	irq = device_get_config_int("irq");
@@ -1974,6 +2407,7 @@ void *ne2000_init()
 
 	config_net_type = device_get_config_int("net_type");
 	/* Network type is now specified in device config. */
+    net_is_vpn = 0;
 	net_is_pcap = config_net_type ? 0 : 1;
 	if(!strcmp("nothing", config_get_string(NULL, "pcap_device", "nothing")))
 	{
@@ -1984,8 +2418,24 @@ void *ne2000_init()
 	{
 		pcap_device_available = 1;
 	}
+    if (config_net_type == 2)
+    {
+        net_is_pcap = 0;
+        net_is_vpn = 1;
+        if (!strcmp("nothing", config_get_string(NULL, "vpn_server", "nothing")))
+        {
+            net_is_vpn = 0;
+            ne2000_log("vpn no server\n");
+        }
+        if (config_get_int(NULL, "vpn_port", 0) == 0)
+        {
+            net_is_vpn = 0;
+            ne2000_log("vpn no port\n");
+        }
+    }
 	ne2000_log("net_is_pcap = %i\n", net_is_pcap);
-	
+    ne2000_log("net_is_vpn = %i\n", net_is_vpn);
+
 	if (is_rtl8029as)
 	{
 		pci_add(ne2000_pci_read, ne2000_pci_write, ne2000);
@@ -2050,37 +2500,54 @@ void *ne2000_init()
     //need a switch statment for more network types.
     if (!net_is_pcap)
 	{
-initialize_slirp:
-		ne2000_log("ne2000 initalizing SLiRP\n");
-		net_is_pcap=0;
-		rc=slirp_init();
-		ne2000_log("ne2000 slirp_init returned: %d\n",rc);
-		if (!rc)
+        if (net_is_vpn)
         {
-			ne2000_log("ne2000 slirp initalized!\n");
+initialize_vpn:
+            ne2000_log("ne2000 initalizing VPN\n");
+            net_is_pcap = 0;
 
-			net_slirp_inited = 1;
-			slirpq = QueueCreate();
-			fizz=0;
-			ne2000_log("ne2000 slirpq is %x\n",&slirpq);
-		}
-		else
-		{
-			net_slirp_inited = 0;
-			if (pcap_device_available)
-			{
-				net_is_pcap = 1;
-				goto initialize_pcap;
-			}
-			else
-			{
-				ne2000_log("Neither SLiRP nor PCap is available on your host, disabling network adapter...\n");
-				free(ne2000);
-				network_card_current = 0;
-				resetpchard();
-				return NULL;
-			}
-		}
+            const char* serverAddr = config_get_string(NULL, "vpn_server", "nothing");
+            int serverPort = config_get_int(NULL, "vpn_port", 0);
+
+            if (ConnectToServer(serverAddr, (uint16_t)serverPort) == TRUE)
+            {
+                memcpy(ne2000->physaddr, maclocal, 6);
+            }
+        }
+        else
+        {
+initialize_slirp:
+            ne2000_log("ne2000 initalizing SLiRP\n");
+            net_is_pcap = 0;
+            rc = slirp_init();
+            ne2000_log("ne2000 slirp_init returned: %d\n", rc);
+            if (!rc)
+            {
+                ne2000_log("ne2000 slirp initalized!\n");
+
+                net_slirp_inited = 1;
+                slirpq = QueueCreate();
+                fizz = 0;
+                ne2000_log("ne2000 slirpq is %x\n", &slirpq);
+            }
+            else
+            {
+                net_slirp_inited = 0;
+                if (pcap_device_available)
+                {
+                    net_is_pcap = 1;
+                    goto initialize_pcap;
+                }
+                else
+                {
+                    ne2000_log("Neither SLiRP nor PCap is available on your host, disabling network adapter...\n");
+                    free(ne2000);
+                    network_card_current = 0;
+                    resetpchard();
+                    return NULL;
+                }
+            }
+        }
 	}
 	else
 	{
@@ -2190,6 +2657,9 @@ void ne2000_close(void *p)
 		pcap_close(net_pcap);
 		ne2000_log("ne2000 closing pcap\n");
 	}
+
+    SDLNet_Quit();
+
 	ne2000_log("ne2000 close\n");
 }
 
@@ -2267,7 +2737,7 @@ static device_config_t ne2000_config[] =
 	{
 		.name = "net_type",
 		.description = "Network type",
-		.type = CONFIG_BINARY,
+		//.type = CONFIG_BINARY,
 		.type = CONFIG_SELECTION,
 		.selection =
 		{
@@ -2279,6 +2749,10 @@ static device_config_t ne2000_config[] =
 				.description = "SLiRP",
 				.value = 1
 			},
+            {
+                .description = "VPN",
+                .value = 2
+            },
 			{
 				.description = ""
 			}
@@ -2348,7 +2822,7 @@ static device_config_t rtl8029as_config[] =
 	{
 		.name = "net_type",
 		.description = "Network type",
-		.type = CONFIG_BINARY,
+		//.type = CONFIG_BINARY,
 		.type = CONFIG_SELECTION,
 		.selection =
 		{
@@ -2360,7 +2834,11 @@ static device_config_t rtl8029as_config[] =
 				.description = "SLiRP",
 				.value = 1
 			},
-			{
+            {
+                .description = "VPN",
+                .value = 2
+            },
+            {
 				.description = ""
 			}
 		},

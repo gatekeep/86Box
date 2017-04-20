@@ -6,8 +6,8 @@
 #define WINVER 0x0600
 #include <windows.h>
 #include <io.h>
-#include "ntddcdrm.h"
-#include "ntddscsi.h"
+#include "ddk/ntddcdrm.h"
+#include "ddk/ntddscsi.h"
 #include "ibm.h"
 #include "cdrom.h"
 #include "cdrom-ioctl.h"

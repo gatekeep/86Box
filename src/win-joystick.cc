@@ -12,6 +12,8 @@ extern "C" {
 #include "plat-joystick.h"
 #include "win.h"
 
+#define DIDEVTYPE_JOYSTICK DI8DEVTYPE_JOYSTICK
+
 extern "C" int video_fullscreen;
 
 extern "C" void fatal(const char *format, ...);
