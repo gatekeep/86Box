@@ -276,7 +276,7 @@ void ne2000_page0_write(ne2000_t *ne2000, uint32_t offset, uint32_t value, unsig
 void ne2000_rx_frame(void *p, const void *buf, int io_len);
 
 //#define ENABLE_NE2000_LOG
-#define ENABLE_PACKET_TRACER
+//#define ENABLE_PACKET_TRACER
 FILE* ne2000log = NULL;
 
 void ne2000_log(const char *format, ...)

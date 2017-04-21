@@ -266,7 +266,9 @@ namespace EightSixBoxVPN
             int bCount = 0, j = 0, lenCount = 0;
 
             // iterate through buffer printing all the stored bytes
-            string traceMsg = message + " Off [" + j.ToString("X4") + "] -> [";
+            Trace(message, 2);
+
+            string traceMsg = "  " + j.ToString("X4") + "  ";
             for (int i = startOffset; i < buffer.Length; i++)
             {
                 byte b = buffer[i];
@@ -274,12 +276,11 @@ namespace EightSixBoxVPN
                 // split the message every 16 bytes...
                 if (bCount == 16)
                 {
-                    traceMsg += "]";
                     Trace(traceMsg, 2);
 
                     bCount = 0;
                     j += 16;
-                    traceMsg = message + " Off [" + j.ToString("X4") + "] -> [";
+                    traceMsg = "  " + j.ToString("X4") + "  ";
                 }
                 else
                     traceMsg += (bCount > 0) ? " " : "";
@@ -297,10 +298,7 @@ namespace EightSixBoxVPN
 
             // if the byte count at this point is non-zero print the message
             if (bCount != 0)
-            {
-                traceMsg += "]";
                 Trace(traceMsg, 2);
-            }
         }
     } // public class Messages
 } // namespace EightSixBoxVPN

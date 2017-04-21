@@ -205,8 +205,10 @@ namespace EightSixBoxVPN.Comm
         /// <param name="pdu"></param>
         public void BroadcastPacket(ProtocolDataUnit pdu)
         {
-            foreach (Session session in sessions)
+            for (int i = 0; i < sessions.Count; i++)
             {
+                Session session = sessions[i];
+
                 if ((session.MAC[3] == pdu.Header.MacAddr[3]) &&
                     (session.MAC[4] == pdu.Header.MacAddr[4]) &&
                     (session.MAC[5] == pdu.Header.MacAddr[5]))
